@@ -23,6 +23,19 @@ class TickTickView extends WatchUi.View {
     private const VISIBLE    = 4;
     private const CONFIRM_MS = 2000;
 
+    // Marquee
+    private const SCROLL_STEP    = 2;   // px per tick (forward)
+    private const SCROLL_MS      = 33;  // timer interval ms (~30 Hz)
+    private const SCROLL_PAUSE_S = 54;  // ticks at start  → 54 × 33ms ≈ 1.8s
+    private const SCROLL_PAUSE_E = 36;  // ticks at end    → 36 × 33ms ≈ 1.2s
+
+    // Marquee scroll sub-states
+    private const SS_PAUSE_START = 0;
+    private const SS_FORWARD     = 1;
+    private const SS_PAUSE_END   = 2;
+    private const SS_BACK        = 3;
+    private const SS_DONE        = 4;  // one loop finished, wait for user action
+
     // States
     private const ST_LOADING  = 0;
     private const ST_LIST     = 1;
@@ -44,6 +57,13 @@ class TickTickView extends WatchUi.View {
     private var _rowH         as Number = 0;
     private var _lastTapRow   as Number = -1;
     private var _lastTapTime  as Number = 0;
+
+    // Marquee scroll state
+    private var _scrollPx    as Number = 0;
+    private var _scrollState as Number = 0;  // 0=pause, 1=forward, 2=back
+    private var _scrollMax   as Number = 0;
+    private var _scrollCount as Number = 0;
+    private var _scrollTimer as Timer.Timer? = null;
 
     function initialize() {
         View.initialize();
@@ -72,6 +92,68 @@ class TickTickView extends WatchUi.View {
 
     function onShow() as Void {
         fetchTasks();
+        _scrollTimer = new Timer.Timer();
+        _scrollTimer.start(method(:onScrollTick), SCROLL_MS, true);
+    }
+
+    function onHide() as Void {
+        if (_scrollTimer != null) {
+            _scrollTimer.stop();
+            _scrollTimer = null;
+        }
+    }
+
+    // Reset marquee to initial state (call on cursor change)
+    private function resetScroll() as Void {
+        _scrollPx    = 0;
+        _scrollMax   = 0;
+        _scrollState = 0;
+        _scrollCount = 0;
+    }
+
+    // Marquee timer callback — drives text scrolling (one-shot loop)
+    function onScrollTick() as Void {
+        if (_state != ST_LIST || _scrollMax == 0) { return; }
+        if (_scrollState == SS_DONE) { return; }
+
+        if (_scrollState == SS_PAUSE_START) {
+            _scrollCount++;
+            if (_scrollCount >= SCROLL_PAUSE_S) {
+                _scrollState = SS_FORWARD;
+                _scrollCount = 0;
+            }
+            return;
+
+        } else if (_scrollState == SS_FORWARD) {
+            _scrollPx += SCROLL_STEP;
+            if (_scrollPx >= _scrollMax) {
+                _scrollPx = _scrollMax;
+                _scrollState = SS_PAUSE_END;
+                _scrollCount = 0;
+            }
+
+        } else if (_scrollState == SS_PAUSE_END) {
+            _scrollCount++;
+            if (_scrollCount >= SCROLL_PAUSE_E) {
+                _scrollState = SS_BACK;
+                _scrollCount = 0;
+            }
+            return;
+
+        } else if (_scrollState == SS_BACK) {
+            // Ease-out: step = scrollPx/3, minimum 1px → converges in ~12 ticks (~0.4s)
+            var step = _scrollPx / 3;
+            if (step < 1) { step = 1; }
+            _scrollPx -= step;
+            if (_scrollPx <= 0) {
+                _scrollPx = 0;
+                _scrollState = SS_DONE;  // stop here; resetScroll() restarts on next user action
+                WatchUi.requestUpdate();
+                return;
+            }
+        }
+
+        WatchUi.requestUpdate();
     }
 
     // -----------------------------------------------------------------------
@@ -100,6 +182,7 @@ class TickTickView extends WatchUi.View {
             _offset = 0;
             _cursor = 0;
             _state  = ST_LIST;
+            resetScroll();
         } else {
             _msg   = "Error: " + code.toString();
             _state = ST_ERROR;
@@ -141,6 +224,7 @@ class TickTickView extends WatchUi.View {
         if (_state == ST_LIST) {
             if (_cursor > 0) { _cursor--; }
             else if (_offset > 0) { _offset--; }
+            resetScroll();
             WatchUi.requestUpdate();
         }
     }
@@ -152,6 +236,7 @@ class TickTickView extends WatchUi.View {
                 if (_cursor < VISIBLE - 1) { _cursor++; }
                 else { _offset++; }
             }
+            resetScroll();
             WatchUi.requestUpdate();
         }
     }
@@ -201,7 +286,10 @@ class TickTickView extends WatchUi.View {
             _lastTapRow = -1;
         } else {
             // 單擊 → 移動游標
-            _cursor = row;
+            if (_cursor != row) {
+                _cursor = row;
+                resetScroll();
+            }
             _lastTapRow = row;
             _lastTapTime = now;
         }
@@ -255,6 +343,8 @@ class TickTickView extends WatchUi.View {
         _rowH  = rowH;
         var rowX    = (w * 0.10).toNumber();
         var rowW    = (w * 0.65).toNumber();
+        var textX   = rowX + 36;
+        var textW   = rowX + rowW - textX;
 
         // Header
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
@@ -306,28 +396,55 @@ class TickTickView extends WatchUi.View {
                 dc.drawLine(cbX + 6, cbY + 13, cbX + 13, cbY + 5);
             }
 
-            // Title (overdue prefix)
-            var prefix = (overdue != null && overdue == true) ? "! " : "";
-            var fullTitle = prefix + title;
-            var maxChars = 14;
-            if (fullTitle.length() > maxChars) {
-                fullTitle = fullTitle.substring(0, maxChars - 1) + "~";
-            }
+            // Title
+            var prefix   = (overdue != null && overdue == true) ? "! " : "";
+            var rawTitle = prefix + title;
 
             dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(rowX + 36, rowY + rowH / 2 - 14, _cjkFont, toMapped(fullTitle),
-                        Graphics.TEXT_JUSTIFY_LEFT);
+
+            if (isCursor && rawTitle.length() > 5) {
+                // Marquee: clip window = width of first 5 chars; text scrolls inside it
+                var mapped5 = toMapped(rawTitle.substring(0, 5));
+                var mapped   = toMapped(rawTitle);
+                var clipW    = dc.getTextWidthInPixels(mapped5, _cjkFont);
+                var fullPx   = dc.getTextWidthInPixels(mapped, _cjkFont);
+                var newMax   = fullPx - clipW;
+                if (newMax < 0) { newMax = 0; }
+                _scrollMax = newMax;
+                if (_scrollPx > _scrollMax) { _scrollPx = _scrollMax; }
+
+                dc.setClip(textX, rowY, clipW, rowH);
+                dc.drawText(textX - _scrollPx, rowY + rowH / 2 - 14, _cjkFont, mapped,
+                            Graphics.TEXT_JUSTIFY_LEFT);
+                dc.clearClip();
+            } else {
+                // Static: first 5 chars only, no overflow
+                var display = rawTitle.length() > 5 ? rawTitle.substring(0, 5) : rawTitle;
+                dc.drawText(textX, rowY + rowH / 2 - 14, _cjkFont, toMapped(display),
+                            Graphics.TEXT_JUSTIFY_LEFT);
+            }
         }
 
-        // Scrollbar
+        // Arc scrollbar along right edge of watch face
         if (_tasks.size() > VISIBLE) {
-            var barX   = rowX + rowW + 4;
-            var barH   = VISIBLE * rowH;
-            var total  = _tasks.size();
-            var tH     = (barH * VISIBLE / total).toNumber();
-            var tY     = listY + (barH * _offset / total).toNumber();
+            var radius    = w / 2 - 10;
+            var arcTop    = 60;   // degrees from 3-o'clock, upper-right
+            var arcBot    = -60;  // degrees, lower-right
+            var arcSpan   = 120;
+            var total     = _tasks.size();
+            var thumbSpan  = (arcSpan * VISIBLE / total).toNumber();
+            var thumbStart = arcTop - (arcSpan * _offset / total).toNumber();
+            var thumbEnd   = thumbStart - thumbSpan;
+
+            // Track (dim grey)
+            dc.setColor(Graphics.COLOR_DK_GRAY, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(3);
+            dc.drawArc(cx, h / 2, radius, Graphics.ARC_CLOCKWISE, arcTop, arcBot);
+
+            // Thumb (white)
             dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-            dc.fillRectangle(barX, tY, 3, tH);
+            dc.drawArc(cx, h / 2, radius, Graphics.ARC_CLOCKWISE, thumbStart, thumbEnd);
+            dc.setPenWidth(1);
         }
     }
 }
