@@ -156,16 +156,16 @@ def auth_callback():
     error = request.args.get("error")
 
     if error:
-        return err(f"OAuth error: {error}"), 400
+        return err(f"OAuth error: {error}")
 
     if not code:
-        return err("Missing authorization code"), 400
+        return err("Missing authorization code")
 
     try:
         client.exchange_code(code)
         return ok(message="Authentication successful! You can close this tab.")
     except Exception as exc:
-        return err(f"Token exchange failed: {exc}"), 500
+        return err(f"Token exchange failed: {exc}", 500)
 
 
 @app.route("/auth/status")
