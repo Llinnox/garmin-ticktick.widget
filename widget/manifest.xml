@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<iq:manifest xmlns:iq="http://www.garmin.com/xml/connectiq" version="3">
+    <iq:application entry="TickTickApp" id="a3c4f5b6-1234-5678-abcd-ef0123456789" launcherIcon="@Drawables.AppIcon" minSdkVersion="3.4.0" name="@Strings.AppName" type="widget" version="1.0.0">
+        <iq:products>
+            <iq:product id="fr955"/>
+        </iq:products>
+        <iq:permissions>
+            <iq:uses-permission id="Communications"/>
+        </iq:permissions>
+        <iq:languages>
+            <iq:language>eng</iq:language>
+            <iq:language>zht</iq:language>
+        </iq:languages>
+        <iq:barrels/>
+    </iq:application>
+</iq:manifest>

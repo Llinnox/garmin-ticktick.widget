@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<resources>
+    <font id="CJKFont" filename="CJKFont.fnt"/>
+    <jsonData id="charMap" filename="charmap.json"/>
+</resources>

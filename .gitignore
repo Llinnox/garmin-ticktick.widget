@@ -1,0 +1,15 @@
+# Sensitive
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Garmin build output
+widget/bin/
+
+# OS
+.DS_Store
+Thumbs.db
