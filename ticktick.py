@@ -57,6 +57,7 @@ class TickTickClient:
             self._tokens = json.load(f)
 
     def _save_tokens(self):
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(TOKEN_FILE, "w") as f:
             json.dump(self._tokens, f, indent=2)
 
