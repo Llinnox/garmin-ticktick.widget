@@ -18,8 +18,8 @@ import Toybox.System;
 
 class TickTickView extends WatchUi.View {
 
-    // ngrok HTTPS URL — update after each ngrok restart
-    private const SERVER     = "https://flyover-zipping-hurler.ngrok-free.dev";
+    // Railway cloud server — permanent 24/7 URL
+    private const SERVER     = "https://web-production-0de0a.up.railway.app";
     private const VISIBLE    = 4;
     private const CONFIRM_MS = 2000;
 
