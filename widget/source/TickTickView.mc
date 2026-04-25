@@ -65,6 +65,11 @@ class TickTickView extends WatchUi.View {
     private var _scrollCount as Number = 0;
     private var _scrollTimer as Timer.Timer? = null;
 
+    // Sync-on-exit state
+    private var _syncIds   as Array   = [];
+    private var _syncIdx   as Number  = 0;
+    private var _isSyncing as Boolean = false;
+
     function initialize() {
         View.initialize();
     }
@@ -255,11 +260,45 @@ class TickTickView extends WatchUi.View {
     }
 
     function handleBack() as Boolean {
-        return true;
+        if (_isSyncing) { return false; }
+
+        var ids = _checked.keys();
+        if (ids.size() == 0) {
+            return true;  // 沒有勾選，直接退出
+        }
+
+        // 有勾選任務 → 依序 POST /complete，全部完成後再退出
+        _syncIds   = ids;
+        _syncIdx   = 0;
+        _isSyncing = true;
+        _msg       = "Syncing...";
+        _state     = ST_CONFIRM;
+        WatchUi.requestUpdate();
+        postNextComplete();
+        return false;
     }
 
-    function handleMenu() as Void {
-        fetchTasks();
+    private function postNextComplete() as Void {
+        if (_syncIdx >= _syncIds.size()) {
+            WatchUi.popView(WatchUi.SLIDE_DOWN);
+            return;
+        }
+        var taskId = _syncIds[_syncIdx] as String;
+        _syncIdx++;
+        Communications.makeWebRequest(
+            SERVER + "/complete/" + taskId,
+            null,
+            {
+                :method       => Communications.HTTP_REQUEST_METHOD_POST,
+                :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON,
+                :headers      => { "ngrok-skip-browser-warning" => "1" }
+            },
+            method(:onCompleteReceived)
+        );
+    }
+
+    function onCompleteReceived(code as Number, raw as Dictionary or String or PersistedContent.Iterator or Null) as Void {
+        postNextComplete();
     }
 
     function handleTap(y as Number) as Void {

@@ -68,9 +68,8 @@ class TickTickDelegate extends WatchUi.BehaviorDelegate {
         return false;
     }
 
-    // Menu button (if long-pressing UP) – force refresh
+    // Long-press UP: disabled
     function onMenu() as Boolean {
-        _view.fetchTasks();
         return true;
     }
 }
