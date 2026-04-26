@@ -293,6 +293,30 @@ def complete_task(task_id: str):
     return ok(taskId=task_id, action="completed")
 
 
+@app.route("/uncomplete/<task_id>", methods=["POST"])
+def uncomplete_task(task_id: str):
+    """Reopen a completed task."""
+    meta = _task_cache.get(task_id)
+    if not meta:
+        body = request.get_json(silent=True) or {}
+        project_id = body.get("projectId", "")
+    else:
+        project_id = meta["projectId"]
+
+    if not project_id:
+        return err("projectId unknown. Call GET /tasks first or supply projectId in body.")
+
+    try:
+        client.uncomplete_task(task_id, project_id)
+    except TokenError as exc:
+        return err(str(exc), 401)
+    except Exception as exc:
+        return err(f"Failed to uncomplete task: {exc}", 502)
+
+    client.invalidate_cache()
+    return ok(taskId=task_id, action="uncompleted")
+
+
 @app.route("/postpone/<task_id>", methods=["POST"])
 def postpone_task(task_id: str):
     """Postpone a task's due date by one day."""

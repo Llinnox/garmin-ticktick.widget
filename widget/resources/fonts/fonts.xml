@@ -1,5 +1,6 @@
 <?xml version="1.0"?>
 <resources>
     <font id="CJKFont" filename="CJKFont.fnt"/>
+    <font id="CJKFontSm" filename="CJKFontSm.fnt"/>
     <jsonData id="charMap" filename="charmap.json"/>
 </resources>

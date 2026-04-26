@@ -181,6 +181,7 @@ class TickTickClient:
                     "dueDate": due_raw,
                     "priority": task.get("priority", 0),
                     "isOverdue": False,
+                    "description": task.get("content", ""),
                 })
 
         result.sort(key=lambda t: -t["priority"])
@@ -231,6 +232,7 @@ class TickTickClient:
                 "dueDate": due_raw,
                 "priority": task.get("priority", 0),
                 "isOverdue": is_overdue,
+                "description": task.get("content", ""),
             })
         result.sort(key=lambda t: (not t["isOverdue"], -t["priority"]))
         return result
@@ -242,6 +244,16 @@ class TickTickClient:
             headers=self._headers(),
         )
         resp.raise_for_status()
+
+    def uncomplete_task(self, task_id: str, project_id: str):
+        """Reopen a completed task by setting status back to 0."""
+        resp = requests.post(
+            f"{BASE_URL}/task/{task_id}",
+            headers=self._headers(),
+            json={"id": task_id, "projectId": project_id, "status": 0},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def postpone_task(self, task_id: str, project_id: str, current_due: str):
         """Push a task's due date forward by one day."""
