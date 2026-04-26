@@ -6,6 +6,7 @@ import Toybox.Timer;
 import Toybox.Lang;
 import Toybox.PersistedContent;
 import Toybox.System;
+import Toybox.Math;
 
 // ---------------------------------------------------------------------------
 // State machine:
@@ -36,6 +37,7 @@ class TickTickView extends WatchUi.View {
     private const ST_FOCUS    = 1;
     private const ST_CONFIRM  = 2;
     private const ST_ERROR    = 3;
+    private const ST_ALL_DONE = 4;
 
     // Runtime
     private var _state   as Number  = ST_LOADING;
@@ -59,6 +61,9 @@ class TickTickView extends WatchUi.View {
     private var _syncIdx   as Number  = 0;
     private var _isSyncing as Boolean = false;
 
+    // All-done entrance animation
+    private var _animTick  as Number       = 0;
+    private var _animTimer as Timer.Timer? = null;
     // Tap-zone cache
     private var _focusedTapY as Number = 0;
     private var _focusedTapH as Number = 0;
@@ -91,6 +96,10 @@ class TickTickView extends WatchUi.View {
             (_scrollTimer as Timer.Timer).stop();
             _scrollTimer = null;
         }
+        if (_animTimer != null) {
+            (_animTimer as Timer.Timer).stop();
+            _animTimer = null;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -98,11 +107,12 @@ class TickTickView extends WatchUi.View {
     // -----------------------------------------------------------------------
 
     private function toMapped(text as String) as String {
-        var out  = "";
-        var map  = _charMap as Dictionary;
+        var out   = "";
+        var map   = _charMap as Dictionary;
         var chars = text.toCharArray();
         for (var i = 0; i < chars.size(); i++) {
-            var idx = map.get(chars[i].toNumber().toString());
+            var cp  = chars[i].toNumber();
+            var idx = map.get(cp.toString());
             if (idx != null) {
                 out = out + (idx as Number).toChar().toString();
             } else {
@@ -173,8 +183,15 @@ class TickTickView extends WatchUi.View {
             _tasks   = (list != null) ? list as Array : [];
             _cursor  = 0;
             _checked = {};
-            _state   = ST_FOCUS;
-            resetScroll();
+            if (_tasks.size() == 0) {
+                _state    = ST_ALL_DONE;
+                _animTick = 0;
+                _animTimer = new Timer.Timer();
+                (_animTimer as Timer.Timer).start(method(:onAnimTick), SCROLL_MS, true);
+            } else {
+                _state = ST_FOCUS;
+                resetScroll();
+            }
         } else {
             _msg   = "Error: " + code.toString();
             _state = ST_ERROR;
@@ -246,6 +263,7 @@ class TickTickView extends WatchUi.View {
 
     // BACK — sync all checked tasks then exit; exit immediately if nothing checked
     function handleBack() as Boolean {
+        if (_state == ST_ALL_DONE) { return true; }
         if (_isSyncing) { return false; }
 
         var ids = _checked.keys();
@@ -346,6 +364,196 @@ class TickTickView extends WatchUi.View {
     }
 
     // -----------------------------------------------------------------------
+    // All-done animation tick
+    // -----------------------------------------------------------------------
+
+    function onAnimTick() as Void {
+        if (_state != ST_ALL_DONE) { return; }
+        _animTick++;
+        WatchUi.requestUpdate();
+    }
+
+    // -----------------------------------------------------------------------
+    // Animation helpers
+    // -----------------------------------------------------------------------
+
+    private function easeOutCubic(t as Float) as Float {
+        var u = 1.0f - t;
+        return 1.0f - u * u * u;
+    }
+
+    private function easeOutBack(t as Float) as Float {
+        var c1 = 1.70158f;
+        var c3 = c1 + 1.0f;
+        var u  = t - 1.0f;
+        return 1.0f + c3 * u * u * u + c1 * u * u;
+    }
+
+    private function animProgress(t as Float, start as Float, end_ as Float) as Float {
+        if (end_ <= start) { return 1.0f; }
+        var v = (t - start) / (end_ - start);
+        if (v < 0.0f) { return 0.0f; }
+        if (v > 1.0f) { return 1.0f; }
+        return v;
+    }
+
+    private function lerpN(a as Number, b as Number, t as Float) as Number {
+        return (a.toFloat() + (b - a).toFloat() * t).toNumber();
+    }
+
+    // Blend a channel from bg toward fg by alpha ∈ [0,1]
+    private function blendCh(bg as Number, fg as Number, alpha as Float) as Number {
+        var v = (bg.toFloat() + (fg - bg).toFloat() * alpha).toNumber();
+        if (v < 0)   { v = 0; }
+        if (v > 255) { v = 255; }
+        return v;
+    }
+
+    // Soft radial halo: draw concentric fills from outer → inner so the
+    // inner area ends up brighter (inner circle later paints over the center).
+    private function drawHalo(dc as Graphics.Dc,
+                               cx as Number, cy as Number, radius as Number,
+                               breathIn as Float, pulse as Float,
+                               baseAlpha as Float) as Void {
+        var overall = breathIn * (0.8f + 0.2f * pulse);
+        var steps   = 5;
+        for (var s = 0; s < steps; s++) {
+            var r = radius - s * radius / steps;
+            if (r <= 1) { continue; }
+            // frac = 0 at outermost step, 1 at innermost → brighter toward center
+            var frac = s.toFloat() / (steps.toFloat() - 1.0f);
+            var ea   = overall * baseAlpha * (0.2f + 0.8f * frac) * (0.6f + 0.4f * pulse);
+            var g    = (140.0f * ea).toNumber();
+            var rb   = ( 55.0f * ea).toNumber();
+            if (g > 2) {
+                dc.setColor((rb << 16) | (g << 8) | rb, Graphics.COLOR_TRANSPARENT);
+                dc.fillCircle(cx, cy, r);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // All-done entrance + idle animation
+    // -----------------------------------------------------------------------
+
+    private function drawAllDone(dc as Graphics.Dc,
+                                  w as Number, h as Number, cx as Number) as Void {
+        var cy = h / 2;
+        var t  = _animTick * 0.033f;           // elapsed seconds (~30 fps)
+        var sc = cx.toFloat() / 150.0f;        // scale: spec uses 150px center
+
+        // ── Layer 01: Watch Bezel (static) ──────────────────────────────────
+        dc.setPenWidth(3);
+        dc.setColor(0x1a1a1e, Graphics.COLOR_TRANSPARENT);
+        dc.drawArc(cx, cy, (148.0f * sc).toNumber(), Graphics.ARC_CLOCKWISE, 89, 90);
+        dc.setPenWidth(1);
+        dc.setColor(0x111114, Graphics.COLOR_TRANSPARENT);
+        dc.drawArc(cx, cy, (143.0f * sc).toNumber(), Graphics.ARC_CLOCKWISE, 89, 90);
+
+        // ── Layer 02: Orbit Ring dashed (0.3 → 0.9 s) ───────────────────────
+        var ringA = easeOutCubic(animProgress(t, 0.3f, 0.9f));
+        if (ringA > 0.01f) {
+            var ringR = (132.0f * sc).toNumber();
+            // #3a6a3a at alpha 0.25 blended onto #060608 background
+            var rr = blendCh(0x06, 0x3a, ringA * 0.25f);
+            var rg = blendCh(0x06, 0x6a, ringA * 0.25f);
+            var rb_ = blendCh(0x08, 0x3a, ringA * 0.25f);
+            dc.setColor((rr << 16) | (rg << 8) | rb_, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(1);
+            // Dashed: 18 arcs of 8° each with 12° gaps (18×20° = 360°)
+            for (var d = 0; d < 18; d++) {
+                var sd = 90 - d * 20;
+                var ed = sd - 8;
+                dc.drawArc(cx, cy, ringR, Graphics.ARC_CLOCKWISE, sd, ed);
+            }
+        }
+
+        // ── Layer 03: Breathing Halos ×3 (1.6 s → ∞) ───────────────────────
+        var breathIn = easeOutCubic(animProgress(t, 1.6f, 2.3f));
+        if (breathIn > 0.01f) {
+            var p0 = 0.5f + 0.5f * Math.sin(t * 0.9f).toFloat();
+            var p1 = 0.5f + 0.5f * Math.sin(t * 0.9f + (Math.PI * 0.66).toFloat()).toFloat();
+            var p2 = 0.5f + 0.5f * Math.sin(t * 0.9f + (Math.PI * 1.33).toFloat()).toFloat();
+            drawHalo(dc, cx, cy, (122.0f * sc).toNumber(), breathIn, p0, 0.10f);
+            drawHalo(dc, cx, cy, (100.0f * sc).toNumber(), breathIn, p1, 0.16f);
+            drawHalo(dc, cx, cy, ( 78.0f * sc).toNumber(), breathIn, p2, 0.22f);
+        }
+
+        // ── Layer 04: Inner Circle (1.4 → 2.1 s, easeOutBack) ───────────────
+        var circleP = easeOutBack(animProgress(t, 1.4f, 2.1f));
+        if (circleP > 0.01f) {
+            var maxIR  = (62.0f * sc).toNumber();
+            var innerR = (62.0f * sc * circleP).toNumber();
+            if (innerR < 0)         { innerR = 0; }
+            if (innerR > maxIR + 5) { innerR = maxIR + 5; }  // clamp overshoot
+
+            // Dark fill
+            dc.setColor(0x0f1f0f, Graphics.COLOR_TRANSPARENT);
+            dc.fillCircle(cx, cy, innerR);
+
+            // Border ring
+            var borderA = easeOutCubic(animProgress(t, 1.4f, 2.0f));
+            if (borderA > 0.01f) {
+                var br2 = blendCh(0x00, 0x2a, borderA);
+                var bg2 = blendCh(0x00, 0x4a, borderA);
+                dc.setColor((br2 << 16) | (bg2 << 8) | br2, Graphics.COLOR_TRANSPARENT);
+                dc.setPenWidth(2);
+                dc.drawArc(cx, cy, innerR, Graphics.ARC_CLOCKWISE, 89, 90);
+                dc.setPenWidth(1);
+            }
+        }
+
+        // ── Layer 05: Checkmark (1.9 → 2.5 s) ──────────────────────────────
+        var checkP = easeOutCubic(animProgress(t, 1.9f, 2.5f));
+        if (checkP > 0.01f) {
+            // Points relative to center (spec center = 150,150)
+            var p1x = cx + (-24.0f * sc).toNumber();
+            var p1y = cy + (  2.0f * sc).toNumber();
+            var p2x = cx + ( -6.0f * sc).toNumber();
+            var p2y = cy + ( 20.0f * sc).toNumber();
+            var p3x = cx + ( 28.0f * sc).toNumber();
+            var p3y = cy + (-18.0f * sc).toNumber();
+
+            var ckR = blendCh(0x00, 0x78, checkP);
+            var ckG = blendCh(0x00, 0xcc, checkP);
+            dc.setColor((ckR << 16) | (ckG << 8) | ckR, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(3);
+
+            if (checkP < 0.5f) {
+                var seg = checkP / 0.5f;
+                dc.drawLine(p1x, p1y, lerpN(p1x, p2x, seg), lerpN(p1y, p2y, seg));
+            } else {
+                var seg2 = (checkP - 0.5f) / 0.5f;
+                dc.drawLine(p1x, p1y, p2x, p2y);
+                dc.drawLine(p2x, p2y, lerpN(p2x, p3x, seg2), lerpN(p2y, p3y, seg2));
+            }
+            dc.setPenWidth(1);
+        }
+
+        // ── Layer 06: Text (2.4 → 3.1 s) ────────────────────────────────────
+        var textA = easeOutCubic(animProgress(t, 2.4f, 3.1f));
+        if (textA > 0.01f) {
+
+            // Main text
+            var txR = blendCh(0x00, 0x8a, textA);
+            var txG = blendCh(0x00, 0xbf, textA);
+            dc.setColor((txR << 16) | (txG << 8) | txR, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(cx, cy + (90.0f * sc).toNumber(),
+                        _cjkFontSm, toMapped("所有任務完成"),
+                        Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER);
+
+            // Sub text — use system font to avoid charmap dependency
+            var sbR = blendCh(0x00, 0x3a, textA);
+            var sbG2 = blendCh(0x00, 0x5a, textA);
+            dc.setColor((sbR << 16) | (sbG2 << 8) | sbR, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(cx, cy + (108.0f * sc).toNumber(),
+                        _cjkFontSm, toMapped("休息一下"),
+                        Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER);
+
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // onUpdate dispatcher
     // -----------------------------------------------------------------------
 
@@ -375,6 +583,9 @@ class TickTickView extends WatchUi.View {
             dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
             dc.drawText(cx, h / 2, Graphics.FONT_MEDIUM, _msg,
                         Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER);
+
+        } else if (_state == ST_ALL_DONE) {
+            drawAllDone(dc, w, h, cx);
 
         } else {
             drawFocus(dc, w, h, cx);
@@ -436,22 +647,22 @@ class TickTickView extends WatchUi.View {
 
         drawCheckbox(dc, cbX, cbY, cbSzMain, isChecked);
 
-        // Title — max 4 chars, bold double-draw, brightest white
+        // Title — marquee scroll if too wide, bold double-draw
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
         var mappedAll = toMapped(title);
-        if (title.length() > 4) {
-            var mapped4 = toMapped(title.substring(0, 4));
-            var window  = dc.getTextWidthInPixels(mapped4, _cjkFont);
-            var fullPx  = dc.getTextWidthInPixels(mappedAll, _cjkFont);
-            var newMax  = fullPx - window;
+        var clipW  = lineX + lineW - textX;
+        var fullPx = dc.getTextWidthInPixels(mappedAll, _cjkFont);
+        if (fullPx > clipW) {
+            var newMax = fullPx - clipW;
             if (newMax < 0) { newMax = 0; }
             _scrollMax = newMax;
             if (_scrollPx > _scrollMax) { _scrollPx = _scrollMax; }
-            dc.setClip(textX, focY, window, cellH);
+            dc.setClip(textX, focY, clipW, cellH);
             dc.drawText(textX - _scrollPx,     focY, _cjkFont, mappedAll, Graphics.TEXT_JUSTIFY_LEFT);
             dc.drawText(textX - _scrollPx + 1, focY, _cjkFont, mappedAll, Graphics.TEXT_JUSTIFY_LEFT);
             dc.clearClip();
         } else {
+            _scrollMax = 0;
             dc.drawText(textX,     focY, _cjkFont, mappedAll, Graphics.TEXT_JUSTIFY_LEFT);
             dc.drawText(textX + 1, focY, _cjkFont, mappedAll, Graphics.TEXT_JUSTIFY_LEFT);
         }

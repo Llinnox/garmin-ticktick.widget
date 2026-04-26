@@ -48,13 +48,15 @@ print(f"  Total: {len(all_titles)} tasks")
 chars_needed = set(range(0x0020, 0x007F))  # ASCII
 
 # UI characters required for widget interface
-UI_CHARS = "高中低無優先描述未完成已點擊切換下滑查看更多↓●○·"
+UI_CHARS = "高中低無優先描述未完成已點擊切換下滑查看更多↓●○·所有任務完成休息一下"
 for ch in UI_CHARS:
     chars_needed.add(ord(ch))
 
 for text in all_titles + list_names + all_descs:
     for ch in text:
-        chars_needed.add(ord(ch))
+        cp = ord(ch)
+        if cp >= 0x0020:  # skip control chars that would corrupt ASCII index ordering
+            chars_needed.add(cp)
 
 print(f"  {len(chars_needed)} unique characters needed")
 
@@ -102,9 +104,18 @@ for idx, cp in enumerate(sorted_cps):
         ox = cx + (CELL_W - g['w']) // 2 - g['bbox'][0]
         oy = cy + (CELL_H - g['h']) // 2 - g['bbox'][1]
         draws[page_i].text((ox, oy), g['ch'], font=pil_font, fill=255)
+    # ASCII: use actual glyph width so letters aren't CJK-wide spaced
+    if cp <= 0x007E:
+        glyph_x    = cx + (CELL_W - g['w']) // 2
+        glyph_w    = g['w']
+        glyph_xadv = g['w'] + 2
+    else:
+        glyph_x    = cx
+        glyph_w    = CELL_W
+        glyph_xadv = CELL_W
     packed[idx] = dict(
-        x=cx, y=cy, width=CELL_W, height=CELL_H,
-        xoffset=0, yoffset=0, xadvance=CELL_W,
+        x=glyph_x, y=cy, width=glyph_w, height=CELL_H,
+        xoffset=0, yoffset=0, xadvance=glyph_xadv,
         page=page_i
     )
 
@@ -125,7 +136,7 @@ with open(fnt_path, 'w', encoding='utf-8') as f:
     for char_id, g in sorted(packed.items()):
         f.write(f'char id={char_id}   x={g["x"]}   y={g["y"]}   width={g["width"]}   height={g["height"]}   xoffset={g["xoffset"]}   yoffset={g["yoffset"]}   xadvance={g["xadvance"]}   page={g["page"]}  chnl=15\n')
 
-charmap = {str(cp): cp_to_idx[cp] for cp in sorted_cps}
+charmap = {str(cp): cp_to_idx[cp] for cp in sorted_cps}  # include ASCII too
 map_path = os.path.join(OUT_DIR, "charmap.json")
 with open(map_path, 'w', encoding='utf-8') as f:
     json.dump(charmap, f, ensure_ascii=False)
@@ -177,8 +188,17 @@ for idx, cp in enumerate(sorted_cps):
         ox = cxg + (CELL_W_SM - g['w']) // 2 - g['bbox'][0]
         oy = cyg + (CELL_H_SM - g['h']) // 2 - g['bbox'][1]
         draws_sm[page_i].text((ox, oy), g['ch'], font=pil_font_sm, fill=255)
-    packed_sm[idx] = dict(x=cxg, y=cyg, width=CELL_W_SM, height=CELL_H_SM,
-                           xoffset=0, yoffset=0, xadvance=CELL_W_SM, page=page_i)
+    # ASCII: use actual glyph width so letters aren't CJK-wide spaced
+    if g is not None and cp <= 0x007E:
+        sm_x    = cxg + (CELL_W_SM - g['w']) // 2
+        sm_w    = g['w']
+        sm_xadv = g['w'] + 2
+    else:
+        sm_x    = cxg
+        sm_w    = CELL_W_SM
+        sm_xadv = CELL_W_SM
+    packed_sm[idx] = dict(x=sm_x, y=cyg, width=sm_w, height=CELL_H_SM,
+                           xoffset=0, yoffset=0, xadvance=sm_xadv, page=page_i)
 
 for i, img in enumerate(pages_sm):
     path = os.path.join(OUT_DIR, f"{OUT_NAME_SM}_{i}.png")
