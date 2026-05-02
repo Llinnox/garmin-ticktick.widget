@@ -1,4 +1,5 @@
 import Toybox.Application;
+import Toybox.Application.Storage;
 import Toybox.Graphics;
 import Toybox.WatchUi;
 import Toybox.Communications;
@@ -7,6 +8,9 @@ import Toybox.Lang;
 import Toybox.PersistedContent;
 import Toybox.System;
 import Toybox.Math;
+import Toybox.Time;
+import Toybox.Time.Gregorian;
+import Toybox.Attention;
 
 // ---------------------------------------------------------------------------
 // State machine:
@@ -16,6 +20,7 @@ import Toybox.Math;
 //   ST_ERROR    → network/server error
 // ---------------------------------------------------------------------------
 
+(:typecheck(disableBackgroundCheck))
 class TickTickView extends WatchUi.View {
 
     private const SERVER = "https://web-production-0de0a.up.railway.app";
@@ -57,13 +62,18 @@ class TickTickView extends WatchUi.View {
     private var _scrollTimer as Timer.Timer? = null;
 
     // Batch-sync on exit
-    private var _syncIds   as Array   = [];
-    private var _syncIdx   as Number  = 0;
-    private var _isSyncing as Boolean = false;
+    private var _syncIds      as Array   = [];
+    private var _syncIdx      as Number  = 0;
+    private var _isSyncing    as Boolean = false;
+    private var _isRefreshing as Boolean = false;
 
     // All-done entrance animation
     private var _animTick  as Number       = 0;
     private var _animTimer as Timer.Timer? = null;
+
+    // Task slide animation
+    private var _slideOffset as Float = 0.0f;
+
     // Tap-zone cache
     private var _focusedTapY as Number = 0;
     private var _focusedTapH as Number = 0;
@@ -86,6 +96,16 @@ class TickTickView extends WatchUi.View {
     }
 
     function onShow() as Void {
+        // Show cached tasks immediately while refreshing in background
+        var cached = Storage.getValue("cachedTasks");
+        if (cached instanceof Array && (cached as Array).size() > 0) {
+            _tasks        = cached as Array;
+            _cursor       = 0;
+            _checked      = {};
+            _state        = ST_FOCUS;
+            _isRefreshing = true;
+            resetScroll();
+        }
         fetchTasks();
         _scrollTimer = new Timer.Timer();
         (_scrollTimer as Timer.Timer).start(method(:onScrollTick), SCROLL_MS, true);
@@ -134,6 +154,13 @@ class TickTickView extends WatchUi.View {
     }
 
     function onScrollTick() as Void {
+        // Slide animation decay (runs regardless of scroll state)
+        if (_slideOffset != 0.0f) {
+            _slideOffset = _slideOffset * 0.6f;
+            if (_slideOffset > -1.5f && _slideOffset < 1.5f) { _slideOffset = 0.0f; }
+            WatchUi.requestUpdate();
+        }
+
         if (_state != ST_FOCUS || _scrollMax == 0) { return; }
         if (_scrollState == SS_DONE) { return; }
 
@@ -162,8 +189,10 @@ class TickTickView extends WatchUi.View {
     // -----------------------------------------------------------------------
 
     function fetchTasks() as Void {
-        _state = ST_LOADING;
-        WatchUi.requestUpdate();
+        if (!_isRefreshing) {
+            _state = ST_LOADING;
+            WatchUi.requestUpdate();
+        }
         Communications.makeWebRequest(
             SERVER + "/tasks",
             null,
@@ -178,11 +207,24 @@ class TickTickView extends WatchUi.View {
 
     function onTasksReceived(code as Number,
                              raw  as Dictionary or String or PersistedContent.Iterator or Null) as Void {
+        _isRefreshing = false;
         if (code == 200 && raw instanceof Dictionary) {
             var list = (raw as Dictionary)["data"];
             _tasks   = (list != null) ? list as Array : [];
-            _cursor  = 0;
+            if (_cursor >= _tasks.size()) { _cursor = 0; }
             _checked = {};
+            // Persist for fast next-open
+            Storage.setValue("cachedTasks", _tasks);
+            // Cache for glance — accumulate done count within same day, reset on new day
+            Storage.setValue("glanceTotal", _tasks.size());
+            var today      = getTodayString();
+            var storedDate = Storage.getValue("glanceDate");
+            if (storedDate == null || !(storedDate as String).equals(today)) {
+                Storage.setValue("glanceDone", 0);
+                Storage.setValue("glanceDoneIds", []);
+                Storage.setValue("glanceDate", today);
+            }
+            cacheNextTaskTime();
             if (_tasks.size() == 0) {
                 _state    = ST_ALL_DONE;
                 _animTick = 0;
@@ -200,11 +242,23 @@ class TickTickView extends WatchUi.View {
     }
 
     // -----------------------------------------------------------------------
-    // HTTP — batch complete on exit
+    // HTTP — complete on exit (sequential)
     // -----------------------------------------------------------------------
 
     private function postNextComplete() as Void {
         if (_syncIdx >= _syncIds.size()) {
+            // All done — remove completed tasks from cache so they don't reappear
+            var remaining = [] as Array;
+            for (var i = 0; i < _tasks.size(); i++) {
+                var t   = _tasks[i] as Dictionary;
+                var tid = t["id"] as String;
+                var done = false;
+                for (var j = 0; j < _syncIds.size(); j++) {
+                    if (tid.equals(_syncIds[j] as String)) { done = true; break; }
+                }
+                if (!done) { remaining.add(t); }
+            }
+            Storage.setValue("cachedTasks", remaining);
             WatchUi.popView(WatchUi.SLIDE_DOWN);
             return;
         }
@@ -224,6 +278,21 @@ class TickTickView extends WatchUi.View {
 
     function onCompleteReceived(code as Number,
                                 raw  as Dictionary or String or PersistedContent.Iterator or Null) as Void {
+        if (code == 200) {
+            var taskId  = _syncIds[_syncIdx - 1] as String;
+            var rawIds  = Storage.getValue("glanceDoneIds");
+            var doneIds = (rawIds != null) ? rawIds as Array : [];
+            var already = false;
+            for (var i = 0; i < doneIds.size(); i++) {
+                if ((doneIds[i] as String).equals(taskId)) { already = true; break; }
+            }
+            if (!already) {
+                doneIds.add(taskId);
+                Storage.setValue("glanceDoneIds", doneIds);
+                var prev = Storage.getValue("glanceDone");
+                Storage.setValue("glanceDone", (prev != null ? prev as Number : 0) + 1);
+            }
+        }
         postNextComplete();
     }
 
@@ -234,7 +303,12 @@ class TickTickView extends WatchUi.View {
     // UP — previous task
     function handleUp() as Void {
         if (_state == ST_FOCUS) {
-            if (_cursor > 0) { _cursor--; resetScroll(); }
+            if (_cursor > 0) {
+                _cursor--;
+                resetScroll();
+                _slideOffset = -45.0f;   // 從上方滑入
+                vibrateShort();
+            }
             WatchUi.requestUpdate();
         }
     }
@@ -242,8 +316,20 @@ class TickTickView extends WatchUi.View {
     // DOWN — next task
     function handleDown() as Void {
         if (_state == ST_FOCUS) {
-            if (_cursor < _tasks.size() - 1) { _cursor++; resetScroll(); }
+            if (_cursor < _tasks.size() - 1) {
+                _cursor++;
+                resetScroll();
+                _slideOffset = 45.0f;    // 從下方滑入
+                vibrateShort();
+            }
             WatchUi.requestUpdate();
+        }
+    }
+
+    // Short haptic pulse
+    private function vibrateShort() as Void {
+        if (Attention has :vibrate) {
+            Attention.vibrate([new Attention.VibeProfile(40, 60)]);
         }
     }
 
@@ -308,6 +394,70 @@ class TickTickView extends WatchUi.View {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    // Return today's local date as "YYYY-MM-DD"
+    private function getTodayString() as String {
+        var info = Gregorian.info(Time.now(), Time.FORMAT_SHORT);
+        var mo = info.month as Number;
+        var d  = info.day   as Number;
+        return (info.year as Number).toString()
+             + "-" + (mo < 10 ? "0" : "") + mo.toString()
+             + "-" + (d  < 10 ? "0" : "") + d.toString();
+    }
+
+    // Find the closest upcoming task due today and store its time (mins from midnight)
+    private function cacheNextTaskTime() as Void {
+        // Derive timezone offset by comparing UTC epoch with Gregorian local time
+        var utcNow    = Time.now();
+        var localInfo = Gregorian.info(utcNow, Time.FORMAT_SHORT);
+
+        var utcSec  = utcNow.value() % 86400;
+        var locSec  = (localInfo.hour as Number) * 3600
+                    + (localInfo.min  as Number) * 60
+                    + (localInfo.sec  as Number);
+        var tzMin   = (locSec - utcSec) / 60;
+        if (tzMin >  720) { tzMin -= 1440; }
+        if (tzMin < -720) { tzMin += 1440; }
+
+        // Today's local date and current time in minutes
+        var todayY  = localInfo.year  as Number;
+        var todayMo = localInfo.month as Number;
+        var todayD  = localInfo.day   as Number;
+        var nowMins = (localInfo.hour as Number) * 60 + (localInfo.min as Number);
+        var bestMins = -1;
+
+        for (var i = 0; i < _tasks.size(); i++) {
+            var t      = _tasks[i] as Dictionary;
+            var dueRaw = t.get("dueDate");
+            if (dueRaw == null) { continue; }
+            var s = dueRaw as String;
+            if (s.length() < 16) { continue; }
+
+            // Parse UTC: "YYYY-MM-DDTHH:MM..."
+            var utcY  = s.substring(0,  4).toNumber();
+            var utcMo = s.substring(5,  7).toNumber();
+            var utcD  = s.substring(8,  10).toNumber();
+            var utcH  = s.substring(11, 13).toNumber();
+            var utcM  = s.substring(14, 16).toNumber();
+            if (utcY == null || utcMo == null || utcD == null ||
+                utcH == null || utcM == null) { continue; }
+
+            // Convert UTC → local minutes from midnight, adjust date if needed
+            var localMins = (utcH as Number) * 60 + (utcM as Number) + tzMin;
+            var localD    = utcD as Number;
+            if (localMins >= 1440) { localMins -= 1440; localD += 1; }
+            if (localMins <     0) { localMins += 1440; localD -= 1; }
+
+            // Must be today and still in the future
+            if ((utcY as Number) != todayY || (utcMo as Number) != todayMo ||
+                localD != todayD) { continue; }
+            if (localMins <= nowMins) { continue; }
+
+            if (bestMins < 0 || localMins < bestMins) { bestMins = localMins; }
+        }
+
+        Storage.setValue("glanceNextMins", bestMins);
+    }
 
     private function priorityText(p as Number) as String {
         if (p >= 5) { return "高"; }
@@ -440,7 +590,8 @@ class TickTickView extends WatchUi.View {
                                   w as Number, h as Number, cx as Number) as Void {
         var cy = h / 2;
         var t  = _animTick * 0.033f;           // elapsed seconds (~30 fps)
-        var sc = cx.toFloat() / 150.0f;        // scale: spec uses 150px center
+        var sc  = cx.toFloat() / 150.0f;        // scale: spec uses 150px center
+        var csc = sc * 1.18f;                   // center graphic scale (+18%)
 
         // ── Layer 01: Watch Bezel (static) ──────────────────────────────────
         dc.setPenWidth(3);
@@ -482,8 +633,8 @@ class TickTickView extends WatchUi.View {
         // ── Layer 04: Inner Circle (1.4 → 2.1 s, easeOutBack) ───────────────
         var circleP = easeOutBack(animProgress(t, 1.4f, 2.1f));
         if (circleP > 0.01f) {
-            var maxIR  = (62.0f * sc).toNumber();
-            var innerR = (62.0f * sc * circleP).toNumber();
+            var maxIR  = (62.0f * csc).toNumber();
+            var innerR = (62.0f * csc * circleP).toNumber();
             if (innerR < 0)         { innerR = 0; }
             if (innerR > maxIR + 5) { innerR = maxIR + 5; }  // clamp overshoot
 
@@ -507,12 +658,12 @@ class TickTickView extends WatchUi.View {
         var checkP = easeOutCubic(animProgress(t, 1.9f, 2.5f));
         if (checkP > 0.01f) {
             // Points relative to center (spec center = 150,150)
-            var p1x = cx + (-24.0f * sc).toNumber();
-            var p1y = cy + (  2.0f * sc).toNumber();
-            var p2x = cx + ( -6.0f * sc).toNumber();
-            var p2y = cy + ( 20.0f * sc).toNumber();
-            var p3x = cx + ( 28.0f * sc).toNumber();
-            var p3y = cy + (-18.0f * sc).toNumber();
+            var p1x = cx + (-24.0f * csc).toNumber();
+            var p1y = cy + (  2.0f * csc).toNumber();
+            var p2x = cx + ( -6.0f * csc).toNumber();
+            var p2y = cy + ( 20.0f * csc).toNumber();
+            var p3x = cx + ( 28.0f * csc).toNumber();
+            var p3y = cy + (-18.0f * csc).toNumber();
 
             var ckR = blendCh(0x00, 0x78, checkP);
             var ckG = blendCh(0x00, 0xcc, checkP);
@@ -639,13 +790,24 @@ class TickTickView extends WatchUi.View {
         var priority  = (priRaw != null) ? priRaw as Number : 0;
         var isChecked = (_checked.get(taskId) != null);
 
-        var focY = line1Y + 10;
-        var cbY  = focY + (cellH - cbSzMain) / 2;
+        // Layout positions (static, used for tap zones and divider)
+        var focY0 = line1Y + 10;
+        var priY0 = focY0 + cellH + 2;
+        var line2Y = priY0 + cellHSm + 4;
 
-        _focusedTapY = focY;
+        _focusedTapY = focY0;
         _focusedTapH = cellH + 2 + cellHSm + 6;
 
+        // Apply slide offset
+        var slideOff = _slideOffset.toNumber();
+        var focY = focY0 + slideOff;
+        var priY = priY0 + slideOff;
+        var cbY  = focY + (cellH - cbSzMain) / 2;
+
+        // Checkbox — clip to focused area vertically so it doesn't bleed during slide
+        dc.setClip(0, line1Y + 1, w, line2Y - line1Y - 1);
         drawCheckbox(dc, cbX, cbY, cbSzMain, isChecked);
+        dc.clearClip();
 
         // Title — marquee scroll if too wide, bold double-draw
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
@@ -657,7 +819,8 @@ class TickTickView extends WatchUi.View {
             if (newMax < 0) { newMax = 0; }
             _scrollMax = newMax;
             if (_scrollPx > _scrollMax) { _scrollPx = _scrollMax; }
-            dc.setClip(textX, focY, clipW, cellH);
+            // Clip both horizontally (marquee) and vertically (slide)
+            dc.setClip(textX, line1Y + 1, clipW, line2Y - line1Y - 1);
             dc.drawText(textX - _scrollPx,     focY, _cjkFont, mappedAll, Graphics.TEXT_JUSTIFY_LEFT);
             dc.drawText(textX - _scrollPx + 1, focY, _cjkFont, mappedAll, Graphics.TEXT_JUSTIFY_LEFT);
             dc.clearClip();
@@ -668,13 +831,11 @@ class TickTickView extends WatchUi.View {
         }
 
         // Priority — small font, gray
-        var priY = focY + cellH + 2;
         dc.setColor(0x888888, Graphics.COLOR_TRANSPARENT);
         dc.drawText(textX, priY, _cjkFontSm, toMapped(priorityText(priority)),
                     Graphics.TEXT_JUSTIFY_LEFT);
 
         // ── Divider line 2 ────────────────────────────────────────────────────
-        var line2Y = priY + cellHSm + 4;
         dc.setColor(0x333333, Graphics.COLOR_TRANSPARENT);
         dc.drawLine(lineX, line2Y, lineX + lineW, line2Y);
 

@@ -56,11 +56,11 @@ class TickTickDelegate extends WatchUi.BehaviorDelegate {
     function onSwipe(swipeEvent as WatchUi.SwipeEvent) as Boolean {
         var dir = swipeEvent.getDirection();
         if (dir == WatchUi.SWIPE_UP) {
-            _view.handleUp();
+            _view.handleDown();   // 上滑 → 列表往上 → 下一個任務
             return true;
         }
         if (dir == WatchUi.SWIPE_DOWN) {
-            _view.handleDown();
+            _view.handleUp();     // 下滑 → 列表往下 → 上一個任務
             return true;
         }
         return false;
